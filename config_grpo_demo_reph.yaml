@@ -1,0 +1,73 @@
+# Model arguments   Qwen/Qwen2.5-3B-Instruct
+model_name_or_path: Qwen/Qwen2.5-3B-Instruct
+model_revision: main
+torch_dtype: bfloat16
+# attn_implementation: flash_attention_2
+
+# Data training arguments
+# We edit the DeepSeek chat template to ensure (a) the reasoning block within <think> and </think> is included in the completion and (b) the <think> tag is not part of the prefill so that the format reward works
+# chat_template: "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% set ns = namespace(is_first=false, is_tool=false, is_output_first=true, system_prompt='') %}{%- for message in messages %}{%- if message['role'] == 'system' %}{% set ns.system_prompt = message['content'] %}{%- endif %}{%- endfor %}{{bos_token}}{{ns.system_prompt}}{%- for message in messages %}{%- if message['role'] == 'user' %}{%- set ns.is_tool = false -%}{{'<｜User｜>' + message['content']}}{%- endif %}{%- if message['role'] == 'assistant' and message['content'] is none %}{%- set ns.is_tool = false -%}{%- for tool in message['tool_calls']%}{%- if not ns.is_first %}{{'<｜Assistant｜><｜tool▁calls▁begin｜><｜tool▁call▁begin｜>' + tool['type'] + '<｜tool▁sep｜>' + tool['function']['name'] + '\\n' + '```json' + '\\n' + tool['function']['arguments'] + '\\n' + '```' + '<｜tool▁call▁end｜>'}}{%- set ns.is_first = true -%}{%- else %}{{'\\n' + '<｜tool▁call▁begin｜>' + tool['type'] + '<｜tool▁sep｜>' + tool['function']['name'] + '\\n' + '```json' + '\\n' + tool['function']['arguments'] + '\\n' + '```' + '<｜tool▁call▁end｜>'}}{{'<｜tool▁calls▁end｜><｜end▁of▁sentence｜>'}}{%- endif %}{%- endfor %}{%- endif %}{%- if message['role'] == 'assistant' and message['content'] is not none %}{%- if ns.is_tool %}{{'<｜tool▁outputs▁end｜>' + message['content'] + '<｜end▁of▁sentence｜>'}}{%- set ns.is_tool = false -%}{%- else %}{% set content = message['content'] %}{{'<｜Assistant｜>' + content + '<｜end▁of▁sentence｜>'}}{%- endif %}{%- endif %}{%- if message['role'] == 'tool' %}{%- set ns.is_tool = true -%}{%- if ns.is_output_first %}{{'<｜tool▁outputs▁begin｜><｜tool▁output▁begin｜>' + message['content'] + '<｜tool▁output▁end｜>'}}{%- set ns.is_output_first = false %}{%- else %}{{'\\n<｜tool▁output▁begin｜>' + message['content'] + '<｜tool▁output▁end｜>'}}{%- endif %}{%- endif %}{%- endfor -%}{% if ns.is_tool %}{{'<｜tool▁outputs▁end｜>'}}{% endif %}{% if add_generation_prompt and not ns.is_tool %}{{'<｜Assistant｜>'}}{% endif %}"
+dataset_name: DigitalLearningGmbH/MATH-lighteval
+generater_path: meta-llama/Meta-Llama-3-8B-Instruct
+# system_prompt: "You are a helpful and intelligent AI assistant. You always follow the user's instructions carefully and precisely."
+system_prompt: "You are an AI assistant skilled in rewriting prompts in diverse and effective ways. Your can provide well-structured and detailed rewordings that maintain the original meaning while improving clarity and variety."
+# system_prompt: "You are an helpful AI rewriting assistant skilled in rewriting sentences in diverse and effective ways. For each sentence you rewrite, your output must: (1) preserve the original meaning, (2) remain grammatically correct, and (3) match the original sentence length as closely as possible (ideally within ±1 word)."
+
+# GRPO trainer config
+bf16: true
+use_peft: false
+use_vllm: true
+vllm_mode: colocate
+lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj","gate_proj", "up_proj", "down_proj"]
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.1
+vllm_gpu_memory_utilization: 0.3
+do_eval: true
+eval_strategy: "no"
+# epoch
+gradient_accumulation_steps: 4
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+hub_model_id: Qwen/Qwen2.5-3B-Instruct
+hub_strategy: every_save
+learning_rate: 1.0e-06
+#2.0e-05
+# 1.0e-06
+log_completions: true
+log_level: info
+logging_first_step: true
+logging_steps: 1
+logging_strategy: steps
+lr_scheduler_type: cosine_with_min_lr
+lr_scheduler_kwargs:
+  min_lr_rate: 0.1
+max_prompt_length: 2048
+max_completion_length: 500
+min_completion_length: 400
+max_steps: -1
+num_generations: 12
+num_train_epochs: 10
+KLreward_threshold: 1
+semantic_thres: 0.85
+# semantic_thres: 0.9
+output_dir: TRAINED/Qwen2.5-3B-pure-500-e5-1e-6-psp-beta1-thres1-085-dynamick-500toks
+overwrite_output_dir: false
+per_device_eval_batch_size: 4
+per_device_train_batch_size: 4
+push_to_hub: false
+reward_funcs:
+- cosine
+reward_weights:
+- 1.0
+- 1.0
+# - 1.0
+save_strategy: "epoch"
+save_total_limit: 100
+seed: 42
+temperature: 0.7
+warmup_ratio: 0.1
+beta: 0.04
+report_to:
+- tensorboard

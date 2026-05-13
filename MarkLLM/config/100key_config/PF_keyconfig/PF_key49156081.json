@@ -1,0 +1,9 @@
+{
+    "algorithm_name": "PF",
+    "ngram": 8,
+    "seed": 0,
+    "seeding": "hash",
+    "salt_key": 49156081,
+    "payload": 0,
+    "max_seq_len": 2048
+}
