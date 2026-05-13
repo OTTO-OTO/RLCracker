@@ -437,7 +437,6 @@ class GRPOTrainer(Trainer):
             optimizers=optimizers,
         )
 
-        # self.similarity_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', device=self.accelerator.device)
         self.psp_args = {
                 'gpu': 0,#1 if torch.cuda.is_available() else 0,
                 'load_file': 'metrics/p_sp_utils/psp/model.para.lc.100.pt',
@@ -445,8 +444,6 @@ class GRPOTrainer(Trainer):
                 'gpu_id': self.accelerator.device.index,
             }
         self.similarity_model, _ = load_model(None, self.psp_args)
-        
-
     
         # Check if the per_device_train/eval_batch_size * num processes can be divided by the number of generations
         num_processes = self.accelerator.num_processes
@@ -568,18 +565,14 @@ class GRPOTrainer(Trainer):
         # Gradient accumulation requires scaled loss. Normally, loss scaling in the parent class depends on whether the
         # model accepts loss-related kwargs. Since we compute our own loss, this check is irrelevant. We set
         # self.model_accepts_loss_kwargs to False to enable scaling.
-        # print('111111111111111111')
         self.model_accepts_loss_kwargs = False
 
         # Add tags to the model
         self.model.add_model_tags(self._tag_names)
-        # print('222222222222222222')
         if self.ref_model is not None:
             if self.is_deepspeed_enabled:
-                # print('33333333333333333333')
                 self.ref_model = prepare_deepspeed(self.ref_model, self.accelerator)
             else:
-                # print('44444444444444444444')
                 self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
 
         if args.sync_ref_model:
@@ -712,41 +705,8 @@ class GRPOTrainer(Trainer):
 
         return logits
 
-    def _get_per_token_entropy(self, model, input_ids, attention_mask, logits_to_keep):
-        # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
-        # try:
-        logits = model(input_ids=input_ids, attention_mask=attention_mask, logits_to_keep=logits_to_keep + 1).logits
-        # except:
-        #     logits = model(input_ids=input_ids, attention_mask=attention_mask, num_logits_to_keep=logits_to_keep + 1).logits
-        logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
-        input_ids = input_ids[:, -logits_to_keep:]
-
-        logits = logits[:, -logits_to_keep:]
-        return -torch.sum(F.softmax(logits, dim=-1) * F.log_softmax(logits, dim=-1), dim=-1)
-    
     def _get_loss_perplexity(self, model, input_ids, attention_mask):
         loss = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids).loss
-        # print(loss)
-
-        # with torch.no_grad():
-        #     logits = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids).logits
-
-        #     # Shift logits and labels to align predictions and targets.
-        #     shift_logits = logits[:, :-1, :].contiguous()
-        #     shift_labels = input_ids[:, 1:].contiguous()
-        #     shift_attention_mask = attention_mask[:, 1:].contiguous()
-
-        #     # Compute each token's loss.
-        #     loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
-        #     loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        #     loss = loss.view(shift_labels.size())
-
-        #     # Compute average sentence loss and exponentiate it into perplexity.
-        #     sum_loss = torch.sum(loss * shift_attention_mask, dim=1)
-        #     lengths = torch.sum(shift_attention_mask, dim=1)
-        #     avg_loss = sum_loss / lengths
-        #     perplexities = torch.exp(avg_loss)
-
         return loss
 
 
@@ -829,33 +789,6 @@ class GRPOTrainer(Trainer):
         return threshold * torch.tanh(x_std)
     
 
-    def _KL_smoother(self, delta, beta=2.0, threshold=1, eps=1e-8):
-        """
-        Map input deltas to the (-1, 1) interval while preserving rank order.
-        
-        Args:
-            delta: List[float] or a 1D Tensor.
-            beta: Controls the compression slope; larger values are smoother.
-
-        Returns:
-            Normalized rewards in (-1, 1).
-        """
-        if not torch.is_tensor(delta):
-            reward_tensor = torch.tensor(delta, dtype=torch.float32)
-        else:
-            reward_tensor = delta.float()
-        
-        mean = reward_tensor.mean()
-        std  = reward_tensor.std(unbiased=False) + eps
-        normalized = (reward_tensor - mean) / std
-        # normalized = torch.tanh(z / beta)
-        return normalized
-        # min_v = reward_tensor.amin(dim=1, keepdim=True)
-        # max_v = reward_tensor.amax(dim=1, keepdim=True)
-        # kl_norm = (reward_tensor - min_v) / (max_v - min_v + 1e-8)  # [0, 1]
-        # kl_norm = (kl_norm - 0.5) * 2    # in [-1,1]
-        # return kl_norm  # [-1, 1]
-
     def _get_zero_count_reward(self, kl_count, thres = 0.15):
             y = (0.95 + 1) / 2
             k = math.log(y / (1 - y)) / (1 - thres)
@@ -866,37 +799,22 @@ class GRPOTrainer(Trainer):
     def _compute_rewards(self, inputs, completion_ids, completion_mask, logits_to_keep):
         # prompts for similating human distribution 
         
-        # question_text = [maybe_apply_chat_template(example, self.processing_class)["question"] for example in inputs]
-        # original_ans = [f"{maybe_apply_chat_template(example, self.processing_class)['question']} "+f"{maybe_apply_chat_template(example, self.processing_class)['watermarked']}" for example in inputs]
-        # raw_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] + '######Instruction: Rewrite the target text above using different words but keeping the same meaning and similar length.\n\n######Your Response:' for example in inputs]
-        # raw_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] + '######Instruction: Generate a version of the target text above that means the same and is about the same length.\n\n######Your Response:' for example in inputs]
-
-        # question_text = [f"######Instruction: {inputs[i]['question']}\n\n######Requirement: Your response should starts with: {self.processing_class.decode(completion_ids[i][:20], skip_special_tokens=True)}\n\n######Your Response: "  for i in range(len(inputs))]
-        # question_text = [f"{inputs[i]['question']} "  for i in range(len(inputs))]
         question_text = [self.processing_class.apply_chat_template([{"role": "user", "content": inputs[i]['question']}],tokenize=False,add_generation_prompt=True,enable_thinking=False)  for i in range(len(inputs))]
-        # question_text = [f"{inputs[i]['question']}\n\n{self.processing_class.decode(completion_ids[i][:20], skip_special_tokens=True)}"  for i in range(len(inputs))]
-
-        # raw_text = [f'######Target Text: {inputs[i]["watermarked"]}\n\n######Instruction: Generate a version of the target text above that means the same and is about the same length.\n\n######Your Response: ' for i in range(len(inputs))]
-
+        
         raw_text = [self.processing_class.apply_chat_template([{"role": "user", "content": f"######Target Text: {inputs[i]['watermarked']}\n\n######Instruction: Generate a version of the target text above that means the same and is about the same length.\n\n######Your Response: "}],tokenize=False,add_generation_prompt=True,enable_thinking=False)
                         for i in range(len(inputs))]
 
-        # original_ans = [f"{example['question']} "+f"{example['watermarked']}" for example in inputs]
-
+        
         question_inputs = self.processing_class(
             question_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
         )
         raw_inputs = self.processing_class(
             raw_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
         )
-        # original_ans_inputs = self.processing_class(
-        #     original_ans, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
-        # )
-
+        
         question_inputs = super()._prepare_inputs(question_inputs)
         raw_inputs = super()._prepare_inputs(raw_inputs)
-        # original_ans_inputs = super()._prepare_inputs(original_ans_inputs)
-
+        
         question_ids, question_mask = question_inputs["input_ids"], question_inputs["attention_mask"]
         raw_ids, raw_mask = raw_inputs["input_ids"], raw_inputs["attention_mask"]
 
@@ -923,33 +841,14 @@ class GRPOTrainer(Trainer):
                 self.model, pwm_ids, pwm_mask, logits_to_keep
             )
 
-        # original_ans_perplex_loss = self._get_loss_perplexity(self.model, original_ans_inputs["input_ids"], original_ans_inputs["attention_mask"])
         perplex_loss = self._get_loss_perplexity(self.model, ph_ids, ph_mask)
-            # original_ans_perplex_loss = self._get_loss_perplexity(self.ref_model, original_ans_inputs["input_ids"], original_ans_inputs["attention_mask"])
-        # print(f"original_ans_perplex_loss: {original_ans_perplex_loss}")
-        # print(f"perplex_loss: {perplex_loss}")
-
-        # perplex_loss = torch.abs(perplex_loss - original_ans_perplex_loss)  # shape: [batch, logits_to_keep]
-
+        
         KL_h = torch.exp(ph_per_token_logps - pa_per_token_logps) - (ph_per_token_logps - pa_per_token_logps) - 1
         KL_wm = torch.exp(pwm_per_token_logps - pa_per_token_logps) - (pwm_per_token_logps - pa_per_token_logps) - 1
 
         kl_reward = KL_wm - KL_h
 
-        
-
-        kl_reward_std = 0# torch.std(kl_reward, dim=-1, unbiased=False)
-
-        # Reducing the distance between ph and pw also works reasonably well.
-        # KL_wmh = torch.exp(ph_per_token_logps - pwm_per_token_logps) - (ph_per_token_logps - pwm_per_token_logps) - 1
-        # ph || pwm
-        # KL_wmh = torch.exp(pwm_per_token_logps - ph_per_token_logps) - (pwm_per_token_logps - ph_per_token_logps) - 1
-        soft_zero_mask = torch.sigmoid((1e-6 - kl_reward) * 200)
-        kl_zero_bonus = soft_zero_mask.sum(dim=-1) / logits_to_keep  # shape: [batch]
-        # Increase the distance between them.
-
-        # return combined_kl.tolist()
-        return kl_reward, kl_zero_bonus, perplex_loss, kl_reward_std#original_ans_perplex_loss KL_h, KL_wm, 
+        return kl_reward, perplex_loss
         
    
     def _generating_contexts(self, prompt_ids, prompt_mask, prompts_text, prompts, device, is_conversation):
@@ -1098,9 +997,6 @@ class GRPOTrainer(Trainer):
 
         prompts = [f"{x['prompt']}######Instruction: Generate a version of the target text above that means the same and is about the same length.\n\n######Your Response:" for x in inputs]
 
-        # prompts = [f"{x['prompt']}######Instruction: Generate a version of the target text above that means the same and is about the same length, without any modifiers. Output only the rephrased text.\n\n######Your Response:" for x in inputs]
-
-        # prompts_text = [f"{maybe_apply_chat_template(example, self.processing_class)['prompt']}######Instruction: Generate a version of the target text above that means the same and is about the same length.\n\n######Your Response:" for example in inputs]
         prompts_text = [self.processing_class.apply_chat_template([{"role": "user", "content": f"{example['prompt']}######Instruction: Generate a version of the target text above that means the same and is about the same length.\n\n######Your Response: "}],tokenize=False,add_generation_prompt=True,enable_thinking=False)
                         for example in inputs]
 
@@ -1116,11 +1012,6 @@ class GRPOTrainer(Trainer):
 
         # print(completions)
 
-        ####################################
-        # prepare for generating the \hat{W}
-        ####################################
-        
-        # print("attention_mask:", torch.all(attention_mask == 1))
         with torch.inference_mode():
             if self.ref_model is not None:
                 ref_per_token_logps = self._get_per_token_logps(
@@ -1157,21 +1048,10 @@ class GRPOTrainer(Trainer):
         
         
         
-        kl_reward, kl_zero_bonus, perplex_loss, kl_reward_std = self._compute_rewards(inputs, completion_ids, completion_mask, logits_to_keep)
+        kl_reward, perplex_loss = self._compute_rewards(inputs, completion_ids, completion_mask, logits_to_keep)
         
-        # zero_mask = torch.isclose(KL_wmh, torch.tensor(0.0, dtype=KL_wmh.dtype, device=KL_wmh.device), atol=1e-6)
+        rewards_per_func[:,-1] = 0 
 
-        # Count near-zero tokens in each sample as a bonus.
-        # kl_zero_bonus = zero_mask.float().sum(dim=-1)/logits_to_keep  # shape: [batch]
-        # kl_zero_bonus = self._get_zero_count_reward(kl_zero_bonus)
-
-        # softmask
-        # soft_zero_mask = torch.exp(-KL_wmh*10)
-        
-        rewards_per_func[:,-1] = 0 #self._get_zero_count_reward(kl_zero_bonus) 
-
-        # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
-        # completions may be distributed across processes
         rewards_per_func = gather(rewards_per_func)
 
         # Apply weights to each reward function's output and sum
@@ -1187,11 +1067,6 @@ class GRPOTrainer(Trainer):
 
         # GRPO Original
         advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
-
-        # advantages = rewards
-
-        # AGPO
-        # advantages = rewards - mean_grouped_rewards
 
         # Slice to keep only the local part of the data
         process_slice = slice(
@@ -1214,13 +1089,6 @@ class GRPOTrainer(Trainer):
 
         self._metrics["reward"].append(rewards.mean().item())
         self._metrics["reward_std"].append(std_grouped_rewards.mean().item())
-
-        # question_text = [f"{inputs[i]['question']}"  for i in range(len(inputs))]
-        # question_inputs = self.processing_class(
-        #             question_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
-        #         )
-        # question_inputs = super()._prepare_inputs(question_inputs)
-        # question_ids, question_mask = question_inputs["input_ids"], question_inputs["attention_mask"]
 
         if (
             self.log_completions
@@ -1250,11 +1118,7 @@ class GRPOTrainer(Trainer):
             "advantages": advantages,
             "sim_rewards": sim_rewards,
             "kl_reward": kl_reward, 
-            "kl_zero_bonus": kl_zero_bonus,
-            "kl_reward_std": kl_reward_std,
-            "perplex_loss": perplex_loss,
-            # "KL_wmh": KL_wmh,
-            # "original_ans_perplex_loss": original_ans_perplex_loss
+            "perplex_loss": perplex_loss
         }
 
     
@@ -1285,49 +1149,16 @@ class GRPOTrainer(Trainer):
         # original
         # total_reward = advantages.unsqueeze(1) + self.klreward_weight*kl_reward # [B, L]0.5
 
-        #dynamic weights
-        # kl_mean = torch.abs(kl_reward.median()) + 1e-6       # shape: []
-        # flat = torch.abs(kl_reward.flatten().to(torch.float32))
-        # flat = kl_reward.to(torch.float32)
-        # q05, q95 = torch.quantile(flat, 0.1), torch.quantile(flat, 0.9)
-        # kl_mean = self.klreward_weight*torch.abs(flat[(flat >= q05) & (flat <= q95)].mean())    # shape: []
-        # # kl_mean = flat.mean()
-        # adv_mean = torch.abs(advantages).mean()    # shape: []
-
-        # flat = kl_reward.to(torch.float32)
-        # kl_means = []
-        # for i in range(kl_reward.shape[0]):
-        #     row = flat[i]  # shape: [L]
-        #     q10, q90 = torch.quantile(row, 0.05), torch.quantile(row, 0.95)
-        #     filtered = row[(row >= q10) & (row <= q90)]
-        #     kl_means.append(torch.abs(filtered.mean()))
-        # kl_mean = torch.stack(kl_means)
-        # adv_mean = torch.abs(advantages)     # shape: []
-        # alpha =  kl_mean*self.klreward_weight / (adv_mean + 1e-8)
-        # alpha = alpha.unsqueeze(1)
-
-        # for Unigram new
-        # alpha = self.seman_weight*(1-sim_rewards.mean())*kl_mean if self.seman_weight*(1-sim_rewards.mean())*(self.klreward_weight*kl_mean)>1 else 1
-
-        # for PF,EWD Unigram old
         alpha = self.seman_weight*(1-sim_rewards.mean()) if self.seman_weight*(1-sim_rewards.mean())>1 else 1
-
-
-        # for PF,EWD Unigram New
-        # alpha = self.seman_weight*(1-sim_rewards.mean())
-
-        # print(alpha)
 
         total_reward = alpha * advantages.unsqueeze(1) + self.klreward_weight*kl_reward # [B, L]0.5
 
         per_token_loss = torch.exp(per_token_logps - per_token_logps.detach()) * total_reward
 
 
-        # per_token_loss = torch.exp(per_token_logps - per_token_logps.detach()) * advantages.unsqueeze(1)
-        # per_token_loss = -(per_token_loss - self.beta * per_token_kl + advantages.unsqueeze(1))
-        per_token_loss = -(per_token_loss - self.beta * per_token_kl) # - KL_wmh
+        per_token_loss = -(per_token_loss - self.beta * per_token_kl)
         
-        loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean() + perplex_loss * self.ppl_weight #+ 0.5*kl_zero_bonus.mean()
+        loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean() + perplex_loss * self.ppl_weight
 
         # Log the metrics
         completion_length = self.accelerator.gather_for_metrics(completion_mask.sum(1)).float().mean().item()
@@ -1337,11 +1168,6 @@ class GRPOTrainer(Trainer):
         self._metrics["kl"].append(self.accelerator.gather_for_metrics(mean_kl).mean().item())
         mean_kl_rewards = ((kl_reward * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
         self._metrics["kl_reward"].append(self.accelerator.gather_for_metrics(mean_kl_rewards).mean().item())
-
-        # self._metrics["kl_mean"].append(self.accelerator.gather_for_metrics(kl_mean).mean().item())
-        # self._metrics["kl_reward-std"].append(self.accelerator.gather_for_metrics(kl_reward_std.mean()).mean().item())
-        # mean_kl_zero_bonus = kl_zero_bonus.mean()
-        # self._metrics["kl_zero_bonus"].append(self.accelerator.gather_for_metrics(mean_kl_zero_bonus).mean().item())
 
         return loss
 
